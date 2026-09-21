@@ -1,0 +1,36 @@
+# Helm values override for the Gateway Operator's internal "gateway" chart
+# (gateway-1.1.0 on this cluster -- gateway-operator 0.8.0/image 0.8.1),
+# referenced by 00-apigateway.yaml via spec.configRef.
+#
+# IMPORTANT -- what's NOT in this file: an fsGroup entry was attempted here
+# (gateway.controller.deployment.podSecurityContext.fsGroup: 10001) to fix a
+# fresh-PVC-ownership crash loop, but it triggered a real Operator bug:
+#
+#   json: cannot unmarshal string into Go struct field
+#   PodSecurityContext.spec.template.spec.securityContext.fsGroup of type int64
+#
+# Confirmed NOT a chart-template issue (the template does a plain toYaml
+# passthrough with zero fsGroup-specific handling) -- the bug is in the
+# Operator's own ConfigMap-values merge logic, which appears to stringify
+# numeric leaf keys that don't already exist in the chart's default values
+# (podSecurityContext defaults to {} -- an empty map, no pre-existing
+# fsGroup key). encryptionKeys.enabled below works fine because that key
+# DOES already exist, typed, in the chart defaults.
+#
+# See README.md in this folder for the full workaround currently in place
+# (a manual kubectl patch on the rendered Deployment, NOT tracked in this
+# file) and the plan to eliminate this problem entirely via Postgres
+# migration (spec.storage is a real, typed APIGateway field, not subject to
+# this merge bug).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: custom-gateway-values
+  namespace: default
+data:
+  values.yaml: |
+    gateway:
+      controller:
+        encryptionKeys:
+          enabled: true
+          secretName: gateway-encryption-keys

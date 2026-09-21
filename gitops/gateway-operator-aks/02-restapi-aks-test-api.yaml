@@ -1,0 +1,15 @@
+apiVersion: gateway.api-platform.wso2.com/v1alpha1
+kind: RestApi
+metadata:
+  name: aks-test-api
+  namespace: default
+spec:
+  displayName: "AKS Test API"
+  version: v1.0
+  context: /aks-test
+  upstream:
+    main:
+      url: https://httpbin.org/anything
+  operations:
+    - method: GET
+      path: /ping

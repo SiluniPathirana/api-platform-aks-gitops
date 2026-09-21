@@ -1,0 +1,25 @@
+# APIGateway CR for the real Azure AKS cluster (wk-onboarding-aks), Bottom-Up
+# (Operator/CRD) mode -- same pattern as gitops/gateway-operator/ (local
+# Rancher Desktop validation), now on actual cloud infrastructure.
+#
+# Storage is still SQLite at this point -- Postgres migration is pending an
+# Azure Policy permission request (see README.md in this folder). Once
+# granted, spec.storage will be added here directly (it's a first-class,
+# properly-typed APIGateway field -- confirmed via `kubectl explain
+# apigateway.spec --recursive` -- unlike podSecurityContext, which only
+# exists via the buggy configRef/ConfigMap merge path. See README for why
+# that distinction matters.)
+apiVersion: gateway.api-platform.wso2.com/v1alpha1
+kind: APIGateway
+metadata:
+  name: cluster-gw
+  namespace: default
+spec:
+  apiSelector:
+    scope: Cluster
+  configRef:
+    name: custom-gateway-values
+  infrastructure:
+    labels:
+      environment: dev
+      team: platform
