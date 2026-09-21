@@ -9,6 +9,12 @@
 # apigateway.spec --recursive` -- unlike podSecurityContext, which only
 # exists via the buggy configRef/ConfigMap merge path. See README for why
 # that distinction matters.)
+#
+# NOTE: the Operator only reconciles the internal Helm release when this
+# CR's own spec changes (bumping its generation) -- it does NOT watch the
+# referenced configRef ConfigMap for content changes on its own. So any
+# time 01-gateway-custom-config.yaml changes, spec.infrastructure.labels
+# here needs a trivial bump (e.g. configRevision) to force a reconcile.
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: APIGateway
 metadata:
@@ -23,3 +29,4 @@ spec:
     labels:
       environment: dev
       team: platform
+      configRevision: "2"
