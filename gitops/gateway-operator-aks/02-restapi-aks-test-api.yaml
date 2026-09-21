@@ -13,3 +13,5 @@ spec:
   operations:
     - method: GET
       path: /ping
+    - method: GET
+      path: /echo
