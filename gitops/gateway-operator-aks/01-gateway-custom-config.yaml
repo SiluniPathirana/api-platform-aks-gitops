@@ -2,12 +2,16 @@
 # (gateway-1.1.0 on this cluster -- gateway-operator 0.8.0/image 0.8.1),
 # referenced by 00-apigateway.yaml via spec.configRef.
 #
-# gatewayRuntime.deployment.replicaCount: 2 + podAntiAffinity below gives
-# active-active router HA -- the gatewayRuntime Service is already
-# type: LoadBalancer, so Kubernetes distributes traffic across both
-# replicas automatically (this replaces the manual external-LB setup used
-# on the VM deployment). Anti-affinity spreads the 2 replicas across the
-# 2 nodes in gatewaypool for real node-level redundancy.
+# gatewayRuntime.deployment.replicaCount: 2 + nodeSelector + podAntiAffinity
+# give active-active router HA confined to the gatewaypool node pool:
+# the gatewayRuntime Service is already type: LoadBalancer, so Kubernetes
+# distributes traffic across both replicas automatically (this replaces
+# the manual external-LB setup used on the VM deployment). nodeSelector
+# keeps these pods off systempool (reserved for cluster components like
+# CoreDNS/ArgoCD) -- confirmed via `kubectl get nodes -L agentpool` that
+# AKS labels its pools agentpool: gatewaypool / systempool. Anti-affinity
+# then spreads the 2 replicas across gatewaypool's 2 nodes for real
+# node-level redundancy, matching what an external LB across 2 VMs did.
 #
 # controller.deployment.replicaCount is intentionally left at the chart
 # default (1) -- confirmed no leader-election exists in this chart, and
@@ -29,6 +33,8 @@ data:
       gatewayRuntime:
         deployment:
           replicaCount: 2
+          nodeSelector:
+            agentpool: gatewaypool
           affinity:
             podAntiAffinity:
               preferredDuringSchedulingIgnoredDuringExecution:

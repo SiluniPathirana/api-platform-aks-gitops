@@ -29,4 +29,4 @@ spec:
     labels:
       environment: dev
       team: platform
-      configRevision: "2"
+      configRevision: "3"
