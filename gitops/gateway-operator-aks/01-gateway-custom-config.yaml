@@ -14,20 +14,27 @@
 # storage is still SQLite (single-writer, can't span replicas on
 # different nodes). Revisit once the Postgres storage migration lands;
 # see README.md for that plan.
-gateway:
-  controller:
-    encryptionKeys:
-      enabled: true
-      secretName: gateway-encryption-keys
-  gatewayRuntime:
-    deployment:
-      replicaCount: 2
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchLabels:
-                    app.kubernetes.io/component: gateway-runtime
-                topologyKey: kubernetes.io/hostname
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: custom-gateway-values
+  namespace: default
+data:
+  values.yaml: |
+    gateway:
+      controller:
+        encryptionKeys:
+          enabled: true
+          secretName: gateway-encryption-keys
+      gatewayRuntime:
+        deployment:
+          replicaCount: 2
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        app.kubernetes.io/component: gateway-runtime
+                    topologyKey: kubernetes.io/hostname
