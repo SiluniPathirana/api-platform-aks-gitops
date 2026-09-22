@@ -87,6 +87,42 @@ data:
       gatewayRuntime:
         deployment:
           replicaCount: 2                    # active-active: 2 router pods instead of the chart default of 1
+          # Explicit httpGet-only probes -- required after the 1.1.0 -> 1.2.3
+          # chart bump. The gateway-operator's own bundled base values
+          # (/config/gateway_values.yaml, written for chart 1.1.0) still set
+          # livenessProbe.exec/readinessProbe.exec (health-check.sh), but
+          # chart 1.2.3's own default switched to httpGet. Helm deep-merges
+          # values rather than replacing them, so without this override the
+          # merged probe ends up with BOTH exec and httpGet set, which the
+          # Kubernetes API rejects: "may not specify more than 1 handler
+          # type". Hit this as a real (currently stale/non-blocking, but
+          # latent) Programmed=False condition on the APIGateway CR. These
+          # values match chart 1.2.3's own httpGet defaults, PLUS an
+          # explicit `exec: null` -- Helm's map merge adds/overrides keys,
+          # it does NOT remove sibling keys by omission, so just adding
+          # httpGet here would still leave the operator's exec key sitting
+          # alongside it (same collision, different source). `exec: null`
+          # is what actually forces that key out of the merged result.
+          livenessProbe:
+            exec: null
+            httpGet:
+              path: /_gateway-health/healthy
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec: null
+            httpGet:
+              path: /_gateway-health/ready
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
           nodeSelector:
             agentpool: gatewaypool           # confines both pods to the gatewaypool node pool, off systempool
           affinity:

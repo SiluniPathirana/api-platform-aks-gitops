@@ -20,9 +20,14 @@ helm upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager \
   --set crds.enabled=true --wait --timeout 5m
 
 # Gateway Operator itself (newer than the local 0.6.0 validation --
-# following the docs page for 1.2.0: image.tag=0.8.1)
+# following the docs page for 1.2.0: image.tag=0.8.1). gateway.helm.chartVersion
+# is the Operator's OWN configurable value naming which internal "gateway"
+# chart version it deploys for every APIGateway it manages -- defaults to
+# 1.1.0, which has NO real Postgres support (see "Postgres migration"
+# below for why that matters). Pinned to 1.2.3 (latest available as of
+# this setup) here so a fresh install doesn't need a follow-up upgrade.
 helm install my-gateway-operator oci://ghcr.io/wso2/api-platform/helm-charts/gateway-operator \
-  --version 0.8.0 --set image.tag=0.8.1
+  --version 0.8.0 --set image.tag=0.8.1 --set gateway.helm.chartVersion=1.2.3
 
 # The AES-256 encryption key Secret (gateway-encryption-keys) --
 # NOT managed by ArgoCD/Git, created out-of-band the same way as the
@@ -88,37 +93,96 @@ This must be **reapplied** any time the `APIGateway` is deleted/recreated
 which it does not do on its own) or otherwise gets a fresh reconcile that
 rebuilds the Deployment from scratch.
 
-**Long-term fix: done -- storage migrated to Postgres.**
-`spec.storage` (`type: postgres` + `connectionSecretRef`) is a real,
-properly-typed `APIGateway` field -- confirmed via `kubectl explain
+**Long-term fix: done -- storage migrated to Postgres.** The path there
+had more real product gaps than expected. In order:
+
+**1. `spec.storage` on the CRD looks right but does nothing.**
+`type: postgres` + `connectionSecretRef` is a real, properly-typed
+`APIGateway` field -- confirmed via `kubectl explain
 apigateway.spec.storage --recursive` (`type`, `connectionSecretRef.name`,
-`connectionSecretRef.key`) -- so it bypasses the ConfigMap-merge bug
-entirely. All replicas of this one gateway cluster's controller share a
-single Postgres database (that's the HA coordination mechanism); a
-separate `APIGateway` instance would get its own database.
+`connectionSecretRef.key`), and setting it genuinely bumps the CR's
+`generation` and triggers a real Helm upgrade. But empirically confirmed
+(via `helm get values`, on **both** chart `1.1.0` and `1.2.3`) that the
+Operator's CR-to-values translation never actually populates the chart's
+storage fields from it -- the release silently stays on `sqlite`
+regardless. Distinct from the `fsGroup` bug above: there the field gets
+corrupted; here it's just dropped. `spec.storage` is deliberately **left
+unset** in `00-apigateway.yaml` -- Postgres is instead configured
+directly via `01-gateway-custom-config.yaml`'s `configRef` ConfigMap
+(`gateway.config.controller.storage.*` + `gateway.controller.postgres.
+passwordSecretRef`), the same proven workaround pattern as `fsGroup` and
+the `gatewayRuntime` scaling.
 
-`eastus` was blocked by an Azure Policy location restriction on
-`az postgres flexible-server create` specifically (AKS itself was
-unaffected by this policy in the same resource group/subscription) --
-`eastus2` was not restricted, so the server was created there instead of
-waiting on the pending permission request:
+**2. Chart `1.1.0` has no real Postgres implementation at all.** Its
+`values.yaml` marks Postgres `(future support)`, with only a `sqlite:`
+sub-block actually defined -- so even bypassing the CRD bug, `1.1.0`
+can't do it. Chart `1.2.3` (latest available) is the first version that
+implements it for real
+(`gateway.config.controller.storage.postgres.{host,port,database,user,
+sslmode}` + a separate `gateway.controller.postgres.passwordSecretRef`
+so the password stays out of the plaintext ConfigMap). The Operator
+hardcodes which internal chart version it deploys, but that's just a
+configurable value on the **already-installed** Operator release --
+`gateway.helm.chartVersion` -- so no Operator version upgrade was
+needed, just:
+```bash
+helm --kube-context wk-onboarding-aks -n default upgrade my-gateway-operator \
+  oci://ghcr.io/wso2/api-platform/helm-charts/gateway-operator --version 0.8.0 \
+  --reuse-values --set gateway.helm.chartVersion=1.2.3
+```
+followed by a `configRevision` bump on `cluster-gw` to force a reconcile
+onto it.
 
+**3. Postgres 15+ permission gotchas.** Creating a dedicated
+least-privilege `gateway` role and granting `ALL PRIVILEGES` on its
+tables (the standard first pass) was not enough:
+- `permission denied for schema public` -- since Postgres 15, `CREATE`
+  on the `public` schema is no longer granted to non-owner roles by
+  default (the controller re-runs its own schema-init routine on every
+  startup, not just once). Fix: `GRANT USAGE, CREATE ON SCHEMA public TO
+  gateway;`
+- `must be owner of table artifacts` -- `GRANT` covers DML, not `ALTER
+  TABLE`; only an object's owner can alter it, and the tables were
+  created by `gwadmin`. Fix: `REASSIGN OWNED BY gwadmin TO gateway;`
+  (run once against `gateway_controller`, transfers ownership of
+  everything `gwadmin` owns there to `gateway`).
+
+**4. After the switch, existing API config doesn't carry over
+automatically.** The controller's `artifacts` table starts genuinely
+empty on the new Postgres database -- it isn't repopulated from the live
+`RestApi`/`APIGateway` Kubernetes resources just because the storage
+backend changed. `curl` against `aks-test-api` returned `404` until its
+`RestApi` CR was deleted and recreated (ArgoCD's `selfHeal` reapplied it
+from git), which forced the Operator to genuinely re-push it into the
+controller's REST API -- confirmed via a real row appearing in
+`artifacts` and the endpoint returning `200` again. A plain annotation
+bump was not enough to trigger this; only a real delete+recreate did.
+
+**Final working configuration:**
 - Server: `wk-onboarding-pg.postgres.database.azure.com` (Azure Postgres
   Flexible Server, Burstable `Standard_B1ms`, `eastus2`,
   `wk-onboarding-rg`), `--public-access 0.0.0.0` (Azure-internal traffic
-  only -- not open to the public internet; schema setup was run from a
-  temporary pod inside the AKS cluster for this reason, not from a local
-  machine).
-- Database: `gateway_controller`.
-- App-level role: `gateway` (least-privilege, distinct from the
-  `gwadmin` server admin superuser).
+  only -- not open to the public internet; all `psql` work here was run
+  from temporary pods inside the AKS cluster for this reason, never from
+  a local machine).
+- Database: `gateway_controller`. App-level role: `gateway`
+  (least-privilege, distinct from the `gwadmin` server admin superuser;
+  owns its own tables per point 3 above).
 - Schema: applied from the local distribution's
   `resources/gateway-controller/db-scripts/gateway-controller-db.postgres.sql`
-  (nothing bundled in the `gateway-1.1.0` chart's `files/` directory).
-- Connection: a `gateway-db-connection` Secret holds the DSN
-  (`postgres://gateway:***@wk-onboarding-pg.postgres.database.azure.com:5432/gateway_controller?sslmode=require`),
-  created out-of-band -- never in git.
-- `00-apigateway.yaml`'s `spec.storage` points at that Secret.
+  (nothing bundled in any pulled `gateway` chart's `files/` directory).
+- Connection: a `gateway-db-connection` Secret holds both a `dsn` key
+  (full connection string, used for manual verification) and a
+  `password` key (used by `gateway.controller.postgres.passwordSecretRef`)
+  -- created out-of-band, never in git.
+- A known lingering cosmetic issue: `cluster-gw-gateway-controller-data`
+  (the old SQLite PVC) was not automatically pruned by the Operator's
+  Helm upgrade even though the chart's PVC template is conditional on
+  `storage.type == "sqlite"` -- Helm normally prunes resources dropped
+  from a chart's render, so this suggests the Operator's Helm invocation
+  doesn't do full three-way-merge pruning. Harmless (unused, unmounted)
+  but safe to delete manually: `kubectl delete pvc
+  cluster-gw-gateway-controller-data`.
 
 The manual `fsGroup` patch above is now obsolete **for the controller**
 specifically -- Postgres removes its need for local SQLite file storage,
@@ -126,8 +190,9 @@ so the PVC/ownership problem doesn't apply to it anymore. (It was never
 relevant to the `gatewayRuntime` router pods, which have no persistent
 storage of their own.)
 
-Two bugs found while working through this (CRD version drift, and this
-`fsGroup` merge bug) have draft GitHub issues written up, not yet posted.
+Three bugs found while working through this (CRD version drift, the
+`fsGroup` merge bug, and `spec.storage` silently not translating to Helm
+values) have draft GitHub issues written up, not yet posted.
 
 ## ArgoCD Application
 
