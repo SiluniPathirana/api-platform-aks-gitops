@@ -41,6 +41,26 @@ data:
           passwordSecretRef:
             name: gateway-db-connection
             key: password
+        deployment:
+          # Postgres is specifically what "enables multi-replica controller
+          # deployments" per this chart's own values.yaml comment -- no leader
+          # election exists or is needed; the schema's gateway_states/events
+          # tables ARE the multi-replica sync mechanism (confirmed via
+          # gateway-controller-db.postgres.sql: "used by eventhub for
+          # multi-replica sync"). Was blocked entirely while storage was
+          # SQLite (single-writer file, can't span replicas/nodes).
+          replicaCount: 2
+          nodeSelector:
+            agentpool: gatewaypool
+          affinity:
+            podAntiAffinity:
+              preferredDuringSchedulingIgnoredDuringExecution:
+                - weight: 100
+                  podAffinityTerm:
+                    labelSelector:
+                      matchLabels:
+                        app.kubernetes.io/component: controller
+                    topologyKey: kubernetes.io/hostname
         tls:
           certManager:
             # commonName/dnsNames must match the hostname clients actually connect with,
