@@ -45,4 +45,4 @@ spec:
     labels:
       environment: dev
       team: platform
-      configRevision: "4"
+      configRevision: "5"
