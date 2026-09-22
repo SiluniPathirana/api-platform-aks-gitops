@@ -1,6 +1,30 @@
 # Helm values override for the Gateway Operator's internal "gateway" chart
-# (gateway-1.1.0 on this cluster -- gateway-operator 0.8.0/image 0.8.1),
-# referenced by 00-apigateway.yaml via spec.configRef.
+# (gateway-1.2.3 on this cluster, upgraded from 1.1.0 -- gateway-operator
+# 0.8.0/image 0.8.1 itself is unchanged, only its gateway.helm.chartVersion
+# value was bumped), referenced by 00-apigateway.yaml via spec.configRef.
+#
+# POSTGRES: set directly here via gateway.config.controller.storage.*
+# rather than through the CRD's spec.storage field. spec.storage IS a
+# real, typed APIGateway field (confirmed via `kubectl explain
+# apigateway.spec.storage --recursive`) and DOES trigger a real
+# reconcile/Helm upgrade -- but empirically verified (via helm get
+# values, on BOTH chart 1.1.0 and 1.2.3) that the Operator's CR-to-values
+# translation never actually populates the chart's storage fields from
+# it; the release silently stays on sqlite regardless. This is a
+# distinct Operator gap from the fsGroup stringification bug -- there
+# the field gets corrupted; here it's just dropped. Also separately
+# confirmed chart 1.1.0 has NO real Postgres implementation at all (its
+# values.yaml marks it "(future support)", with only a sqlite: sub-block
+# defined) -- 1.2.3 is the first version that actually implements it.
+# Full field path confirmed via chart source inspection:
+#   gateway.config.controller.storage.{type, postgres.*}  -- connection
+#   gateway.controller.postgres.passwordSecretRef.{name,key} -- password
+#     (kept OUT of this ConfigMap deliberately -- injected from the
+#     gateway-db-connection Secret's "password" key, created out-of-band)
+# Once this took effect, the controller's PVC stopped being created --
+# templates/gateway/controller/pvc.yaml is conditional on
+# storage.type == "sqlite" -- so the earlier fsGroup patch is no longer
+# needed for the controller (confirmed obsolete, not just assumed).
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -13,6 +37,10 @@ data:
         encryptionKeys:
           enabled: true                            # mounts the AES-256 key secret below into the controller
           secretName: gateway-encryption-keys       # pre-existing secret, created out-of-band (not in git)
+        postgres:
+          passwordSecretRef:
+            name: gateway-db-connection
+            key: password
         tls:
           certManager:
             # commonName/dnsNames must match the hostname clients actually connect with,
@@ -22,6 +50,15 @@ data:
             dnsNames:
               - wk-onboarding-gw.eastus.cloudapp.azure.com
       config:
+        controller:
+          storage:
+            type: postgres
+            postgres:
+              host: wk-onboarding-pg.postgres.database.azure.com
+              port: 5432
+              database: gateway_controller
+              user: gateway
+              sslmode: require
         router:
           # Envoy's virtual-host matcher. "*" (chart default) matches any Host header --
           # fine for a demo, but setting the real hostname here is what actually makes
