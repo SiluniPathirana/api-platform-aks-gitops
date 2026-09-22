@@ -1,42 +1,41 @@
 # Helm values override for the Gateway Operator's internal "gateway" chart
 # (gateway-1.1.0 on this cluster -- gateway-operator 0.8.0/image 0.8.1),
 # referenced by 00-apigateway.yaml via spec.configRef.
-#
-# gatewayRuntime.deployment.replicaCount: 2 + nodeSelector + podAntiAffinity
-# give active-active router HA confined to the gatewaypool node pool:
-# the gatewayRuntime Service is already type: LoadBalancer, so Kubernetes
-# distributes traffic across both replicas automatically (this replaces
-# the manual external-LB setup used on the VM deployment). nodeSelector
-# keeps these pods off systempool (reserved for cluster components like
-# CoreDNS/ArgoCD) -- confirmed via `kubectl get nodes -L agentpool` that
-# AKS labels its pools agentpool: gatewaypool / systempool. Anti-affinity
-# then spreads the 2 replicas across gatewaypool's 2 nodes for real
-# node-level redundancy, matching what an external LB across 2 VMs did.
-#
-# controller.deployment.replicaCount is intentionally left at the chart
-# default (1) -- confirmed no leader-election exists in this chart, and
-# storage is still SQLite (single-writer, can't span replicas on
-# different nodes). Revisit once the Postgres storage migration lands;
-# see README.md for that plan.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: custom-gateway-values
+  name: custom-gateway-values      # must match spec.configRef.name in 00-apigateway.yaml exactly
   namespace: default
 data:
-  values.yaml: |
+  values.yaml: |                   # the ONLY key the Operator reads -- this whole blob is the chart's values.yaml
     gateway:
       controller:
         encryptionKeys:
-          enabled: true
-          secretName: gateway-encryption-keys
+          enabled: true                            # mounts the AES-256 key secret below into the controller
+          secretName: gateway-encryption-keys       # pre-existing secret, created out-of-band (not in git)
+        tls:
+          certManager:
+            # commonName/dnsNames must match the hostname clients actually connect with,
+            # or TLS hostname verification fails. Was "localhost" (chart default) -- clients
+            # could only reach it by IP with curl -k, since no cert covered a real hostname.
+            commonName: wk-onboarding-gw.eastus.cloudapp.azure.com
+            dnsNames:
+              - wk-onboarding-gw.eastus.cloudapp.azure.com
+      config:
+        router:
+          # Envoy's virtual-host matcher. "*" (chart default) matches any Host header --
+          # fine for a demo, but setting the real hostname here is what actually makes
+          # the gateway a proper named endpoint rather than "whatever IP happens to answer".
+          gateway_host: wk-onboarding-gw.eastus.cloudapp.azure.com
       gatewayRuntime:
         deployment:
-          replicaCount: 2
+          replicaCount: 2                    # active-active: 2 router pods instead of the chart default of 1
           nodeSelector:
-            agentpool: gatewaypool
+            agentpool: gatewaypool           # confines both pods to the gatewaypool node pool, off systempool
           affinity:
             podAntiAffinity:
+              # "preferred" (soft) rule: spreads the 2 replicas across gatewaypool's 2
+              # different nodes when possible, without blocking scheduling if it can't.
               preferredDuringSchedulingIgnoredDuringExecution:
                 - weight: 100
                   podAffinityTerm:
@@ -44,3 +43,10 @@ data:
                       matchLabels:
                         app.kubernetes.io/component: gateway-runtime
                     topologyKey: kubernetes.io/hostname
+        service:
+          annotations:
+            # Azure's free DNS-label feature: makes AKS's cloud-controller-manager register
+            # this label against the LoadBalancer's public IP, giving a stable hostname
+            # (wk-onboarding-gw.eastus.cloudapp.azure.com) instead of a bare IP that would
+            # change if the Service/LB were ever recreated.
+            service.beta.kubernetes.io/azure-dns-label-name: wk-onboarding-gw
