@@ -1,0 +1,119 @@
+# ArgoCD Application for the API Portal + Platform API umbrella chart, on
+# the real Azure AKS cluster (wk-onboarding-aks). Unlike gitops/gateway-operator-aks/
+# (which hand-writes plain K8s manifests + a ConfigMap, because the gateway-operator
+# has no chart of its own for the resources it manages), this pulls WSO2's own
+# official Helm chart directly from its OCI registry -- confirmed to exist via
+# `helm pull oci://ghcr.io/wso2/api-platform/helm-charts/api-portal --version 1.0.0`
+# (an umbrella chart bundling `platform-api` 0.16.0 and `api-portal-ui` 1.0.0 as
+# subcharts, with cert-manager integration, HPA, and PodDisruptionBudget support
+# built in -- no fsGroup/PVC-ownership workaround needed here, unlike the gateway).
+#
+# Secrets (api-portal-platform-api-secrets, api-portal-api-portal-ui-secrets) are
+# created out-of-band, never in git -- see README.md for the exact commands.
+#
+# api-portal-ui.image is overridden to a custom build (ghcr.io/lasanthas/api-portal,
+# not the official ghcr.io/wso2/api-platform/api-portal image) per explicit
+# instruction. platform-api stays on the official WSO2 image.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: api-portal-aks
+  namespace: argocd
+spec:
+  project: default
+  source:
+    # NOTE: no oci:// scheme prefix here -- unlike `helm pull`, ArgoCD's
+    # Application source.repoURL for an OCI chart takes the bare registry
+    # host/path (confirmed via ArgoCD's own Helm docs after the first
+    # attempt, which included oci://, failed with a 403 on a malformed
+    # request path missing the chart name entirely). Must match the
+    # repository Secret's own `url:` field (see README.md), which was
+    # already correct without the prefix.
+    repoURL: ghcr.io/wso2/api-platform/helm-charts
+    chart: api-portal
+    targetRevision: 1.0.0
+    helm:
+      valuesObject:
+        global:
+          platformApi:
+            port: 9243
+            tlsEnabled: true
+
+        platform-api:
+          enabled: true
+          secrets:
+            existingSecret: api-portal-platform-api-secrets
+          config:
+            # Postgres instead of SQLite -- sidesteps the fresh-PVC-ownership
+            # crash loop entirely (same class of issue hit on the gateway
+            # controller, fixed the same way there). Reuses the existing
+            # wk-onboarding-pg server from the gateway's Postgres migration,
+            # with its own dedicated database + least-privilege role.
+            database:
+              driver: postgres
+              postgres:
+                host: wk-onboarding-pg.postgres.database.azure.com
+                port: 5432
+                name: platform_api
+                user: platform_api
+                sslMode: require
+          # No PVC needed once off SQLite -- unlike the gateway chart, this
+          # one's pvc.yaml isn't auto-conditional on the driver, it's tied
+          # to persistence.enabled directly, so this must be set explicitly.
+          persistence:
+            enabled: false
+
+        api-portal-ui:
+          enabled: true
+          image:
+            repository: ghcr.io/lasanthas/api-portal
+            tag: "1.0.0"
+          secrets:
+            existingSecret: api-portal-api-portal-ui-secrets
+            hasPublicKey: true
+          config:
+            server:
+              baseUrl: https://wk-onboarding-portal.eastus.cloudapp.azure.com:9543
+            database:
+              driver: postgres
+              host: wk-onboarding-pg.postgres.database.azure.com
+              port: 5432
+              database: devportal
+              user: devportal
+              # Only disable/verify-full are supported here (unlike
+              # platform-api's 4 sslMode options) -- verify-full requires the
+              # container's default CA trust store to already include
+              # whatever CA signed Azure's Postgres cert. Untested until we
+              # actually deploy; sslRootCert is available as a fallback if
+              # verification fails.
+              sslmode: verify-full
+            platformApi:
+              # Skip TLS verification on the portal -> Platform API hop. Platform
+              # API's own cert-manager cert is self-signed with commonName
+              # platform-api.localhost, which won't match the in-cluster Service
+              # DNS name api-portal-platform-api actually connects through --
+              # same insecure-by-default pattern as the local distribution's
+              # APIP_AP_AUTH_LOCAL_TLS_SKIP_VERIFY (defaults true there too).
+              insecure: true
+            organization:
+              handle: default
+          persistence:
+            enabled: false
+          service:
+            annotations:
+              # Azure's free DNS-label feature -- same pattern as the gateway's
+              # gatewayRuntime Service. Resolves to
+              # wk-onboarding-portal.eastus.cloudapp.azure.com
+              service.beta.kubernetes.io/azure-dns-label-name: wk-onboarding-portal
+          tls:
+            certManager:
+              commonName: wk-onboarding-portal.eastus.cloudapp.azure.com
+              dnsNames:
+                - wk-onboarding-portal.eastus.cloudapp.azure.com
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
