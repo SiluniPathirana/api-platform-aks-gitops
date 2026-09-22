@@ -88,27 +88,43 @@ This must be **reapplied** any time the `APIGateway` is deleted/recreated
 which it does not do on its own) or otherwise gets a fresh reconcile that
 rebuilds the Deployment from scratch.
 
-**Long-term fix in progress:** migrate storage to Postgres.
+**Long-term fix: done -- storage migrated to Postgres.**
 `spec.storage` (`type: postgres` + `connectionSecretRef`) is a real,
 properly-typed `APIGateway` field -- confirmed via `kubectl explain
-apigateway.spec --recursive` -- so it bypasses the ConfigMap-merge bug
-entirely. All replicas of this one gateway cluster's controller will
-share a single Postgres database (that's the HA coordination mechanism);
-a separate `APIGateway` instance would get its own database. Blocked as
-of now on an Azure Policy region restriction on `eastus` for
-`az postgres flexible-server create` (AKS itself is unaffected by this
-policy) -- permission request sent, pending a reply. Once granted:
+apigateway.spec.storage --recursive` (`type`, `connectionSecretRef.name`,
+`connectionSecretRef.key`) -- so it bypasses the ConfigMap-merge bug
+entirely. All replicas of this one gateway cluster's controller share a
+single Postgres database (that's the HA coordination mechanism); a
+separate `APIGateway` instance would get its own database.
 
-1. Create the `gateway_controller` DB + `gateway` user.
-2. Apply the schema script (check `gateway-1.1.0` chart's `files/`
-   directory first; fall back to the local distribution's
-   `resources/gateway-controller/db-scripts/gateway-controller-db.postgres.sql`).
-3. Create a `gateway-db-connection` Secret holding the DSN
-   (`postgres://user:pass@host:5432/db?sslmode=require`).
-4. Add `spec.storage` to `00-apigateway.yaml` pointing at that Secret.
-5. Verify, then drop the manual `fsGroup` patch above -- Postgres removes
-   the need for local SQLite file storage entirely, so the PVC/ownership
-   problem goes away rather than needing a fix.
+`eastus` was blocked by an Azure Policy location restriction on
+`az postgres flexible-server create` specifically (AKS itself was
+unaffected by this policy in the same resource group/subscription) --
+`eastus2` was not restricted, so the server was created there instead of
+waiting on the pending permission request:
+
+- Server: `wk-onboarding-pg.postgres.database.azure.com` (Azure Postgres
+  Flexible Server, Burstable `Standard_B1ms`, `eastus2`,
+  `wk-onboarding-rg`), `--public-access 0.0.0.0` (Azure-internal traffic
+  only -- not open to the public internet; schema setup was run from a
+  temporary pod inside the AKS cluster for this reason, not from a local
+  machine).
+- Database: `gateway_controller`.
+- App-level role: `gateway` (least-privilege, distinct from the
+  `gwadmin` server admin superuser).
+- Schema: applied from the local distribution's
+  `resources/gateway-controller/db-scripts/gateway-controller-db.postgres.sql`
+  (nothing bundled in the `gateway-1.1.0` chart's `files/` directory).
+- Connection: a `gateway-db-connection` Secret holds the DSN
+  (`postgres://gateway:***@wk-onboarding-pg.postgres.database.azure.com:5432/gateway_controller?sslmode=require`),
+  created out-of-band -- never in git.
+- `00-apigateway.yaml`'s `spec.storage` points at that Secret.
+
+The manual `fsGroup` patch above is now obsolete **for the controller**
+specifically -- Postgres removes its need for local SQLite file storage,
+so the PVC/ownership problem doesn't apply to it anymore. (It was never
+relevant to the `gatewayRuntime` router pods, which have no persistent
+storage of their own.)
 
 Two bugs found while working through this (CRD version drift, and this
 `fsGroup` merge bug) have draft GitHub issues written up, not yet posted.

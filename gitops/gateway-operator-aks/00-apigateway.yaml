@@ -2,19 +2,30 @@
 # (Operator/CRD) mode -- same pattern as gitops/gateway-operator/ (local
 # Rancher Desktop validation), now on actual cloud infrastructure.
 #
-# Storage is still SQLite at this point -- Postgres migration is pending an
-# Azure Policy permission request (see README.md in this folder). Once
-# granted, spec.storage will be added here directly (it's a first-class,
-# properly-typed APIGateway field -- confirmed via `kubectl explain
-# apigateway.spec --recursive` -- unlike podSecurityContext, which only
-# exists via the buggy configRef/ConfigMap merge path. See README for why
-# that distinction matters.)
+# Storage is Postgres (spec.storage) -- a first-class, properly-typed
+# APIGateway field, confirmed via `kubectl explain apigateway.spec.storage
+# --recursive` (type/connectionSecretRef.name/connectionSecretRef.key),
+# so it bypasses the buggy configRef/ConfigMap merge path entirely (unlike
+# podSecurityContext, see README for that distinction). Server:
+# wk-onboarding-pg.postgres.database.azure.com (Azure Postgres Flexible
+# Server, eastus2 -- eastus itself was blocked by an Azure Policy location
+# restriction on this resource type; eastus2 was not). Database
+# gateway_controller, app-level role "gateway" (least-privilege, distinct
+# from the gwadmin server superuser), schema applied from
+# gateway-controller-db.postgres.sql. The DSN lives in the
+# gateway-db-connection Secret, created out-of-band -- never in git.
+# This also removes the earlier SQLite/fsGroup PVC-ownership workaround's
+# relevance to the controller: no PVC, no fsGroup patch needed for it
+# going forward (the gatewayRuntime router pods have no storage at all,
+# so that was never their concern).
 #
 # NOTE: the Operator only reconciles the internal Helm release when this
 # CR's own spec changes (bumping its generation) -- it does NOT watch the
 # referenced configRef ConfigMap for content changes on its own. So any
 # time 01-gateway-custom-config.yaml changes, spec.infrastructure.labels
 # here needs a trivial bump (e.g. configRevision) to force a reconcile.
+# (A direct spec.storage change like this one already bumps generation on
+# its own -- no configRevision bump needed for this particular commit.)
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: APIGateway
 metadata:
@@ -25,6 +36,11 @@ spec:
     scope: Cluster
   configRef:
     name: custom-gateway-values
+  storage:
+    type: postgres
+    connectionSecretRef:
+      name: gateway-db-connection
+      key: dsn
   infrastructure:
     labels:
       environment: dev
