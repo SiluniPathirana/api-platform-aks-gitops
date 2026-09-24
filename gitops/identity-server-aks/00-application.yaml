@@ -1,0 +1,147 @@
+# ArgoCD Application for WSO2 Identity Server 7.3.0-1 on wk-onboarding-aks.
+#
+# Pulls the chart directly from WSO2's Helm repo (https://helm.wso2.com,
+# not OCI -- unlike api-portal-aks and gateway-operator-aks, which both
+# use ghcr.io OCI registries). Confirmed reachable and chart 7.3.0-1
+# exists via `helm show values wso2/identity-server --version 7.3.0-1`
+# during the original manual bring-up.
+#
+# Image is a custom build (wkonboardingacr.azurecr.io/wso2is/is:7.3.0-pg)
+# layering the PostgreSQL JDBC driver onto the public wso2is:7.3.0 image --
+# the official image doesn't bundle it, and IS's own database-persistence
+# bundle only ships an H2 driver. See gitops/identity-server-aks/README.md
+# for the full story (image pull secret chart bug, arch mismatch, etc.)
+#
+# SECRETS: unlike api-portal-aks/gateway-operator-aks (which reference an
+# existing K8s Secret via secrets.existingSecret / passwordSecretRef), this
+# chart has no such mechanism for most of its credentials -- deploymentToml.*
+# passwords are plain Helm values baked into a ConfigMap, with only ONE
+# exception (deployment.secretStore.azure, Key Vault CSI integration, and
+# even that covers only the internal keystore password). All password
+# fields below are __SET_VIA_KEYVAULT__ placeholders -- this Application
+# will NOT deploy successfully as committed. See README.md.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: identity-server-aks
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://helm.wso2.com
+    chart: identity-server
+    targetRevision: 7.3.0-1
+    helm:
+      valuesObject:
+        deployment:
+          replicas: 1
+
+          image:
+            registry: wkonboardingacr.azurecr.io
+            repository: wso2is/is
+            tag: "7.3.0-pg"
+            # Interim ACR-admin-account pull secret -- see gateway-operator-aks's
+            # own README for the same subscription-permissions gap (attach-acr
+            # needs Owner/User Access Administrator, not yet available). Replace
+            # with AAD role-based ACR pull once that's resolved.
+            imagePullSecret: wko-acr-pull
+
+          ingress:
+            enabled: true
+            hostName: wk-onboarding-is.eastus.cloudapp.azure.com
+
+          externalJKS:
+            enabled: true
+            # secretName: chart default "keystores" -- created out-of-band,
+            # same pattern as api-portal-aks's existingSecret references.
+            # NOT managed by this Application; must already exist in the
+            # `default` namespace before this syncs successfully.
+
+        # WORKAROUND for a real bug in wso2/identity-server:7.3.0-1's own
+        # templates/deployment.yaml (line 249): it reads the image-pull-secret
+        # name from .Values.wso2.deployment.image.imagePullSecret instead of
+        # the correct .Values.deployment.image.imagePullSecret it checks two
+        # lines above. Confirmed by pulling the chart source directly
+        # (`helm pull wso2/identity-server --version 7.3.0-1 --untar`) and
+        # grepping templates/deployment.yaml -- not a config mistake on our
+        # side. Keep this value in sync with deployment.image.imagePullSecret
+        # above.
+        wso2:
+          deployment:
+            image:
+              imagePullSecret: wko-acr-pull
+
+        deploymentToml:
+          superAdmin:
+            username: admin
+            password: __SET_VIA_KEYVAULT__
+
+          keystore:
+            tls:
+              fileName: tls.p12
+              type: PKCS12
+              password: __SET_VIA_KEYVAULT__
+              alias: wso2carbon
+              keyPassword: __SET_VIA_KEYVAULT__
+            primary:
+              fileName: primary.p12
+              type: PKCS12
+              password: __SET_VIA_KEYVAULT__
+              alias: wso2carbon
+              keyPassword: __SET_VIA_KEYVAULT__
+            internal:
+              fileName: internal.p12
+              type: PKCS12
+              password: __SET_VIA_KEYVAULT__
+              alias: wso2carbon
+              keyPassword: __SET_VIA_KEYVAULT__
+          truststore:
+            fileName: client-truststore.p12
+            type: PKCS12
+            password: __SET_VIA_KEYVAULT__
+
+          # identity/shared/user/consent/agentIdentity are 4 real physical
+          # Postgres databases (user shares shared's DB -- confirmed via the
+          # chart's own H2 defaults, both point at WSO2SHARED_DB).
+          database:
+            identity:
+              type: postgresql
+              username: wso2is
+              password: __SET_VIA_KEYVAULT__
+              url: "jdbc:postgresql://wk-onboarding-pg.postgres.database.azure.com:5432/is_identity?sslmode=require"
+              driver: org.postgresql.Driver
+            shared:
+              type: postgresql
+              username: wso2is
+              password: __SET_VIA_KEYVAULT__
+              url: "jdbc:postgresql://wk-onboarding-pg.postgres.database.azure.com:5432/is_shared?sslmode=require"
+              driver: org.postgresql.Driver
+            user:
+              type: postgresql
+              username: wso2is
+              password: __SET_VIA_KEYVAULT__
+              url: "jdbc:postgresql://wk-onboarding-pg.postgres.database.azure.com:5432/is_shared?sslmode=require"
+              driver: org.postgresql.Driver
+            consent:
+              type: postgresql
+              username: wso2is
+              password: __SET_VIA_KEYVAULT__
+              url: "jdbc:postgresql://wk-onboarding-pg.postgres.database.azure.com:5432/is_consent?sslmode=require"
+              driver: org.postgresql.Driver
+            agentIdentity:
+              type: postgresql
+              username: wso2is
+              password: __SET_VIA_KEYVAULT__
+              url: "jdbc:postgresql://wk-onboarding-pg.postgres.database.azure.com:5432/is_agent_identity?sslmode=require"
+              driver: org.postgresql.Driver
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  # Deliberately NOT automated (unlike api-portal-aks / gateway-operator-aks,
+  # which both use automated: {prune: true, selfHeal: true}). The live
+  # is-identity-server release was deployed manually and is currently
+  # healthy, with real passwords that are NOT in this file (see above).
+  # Auto-sync would push these __SET_VIA_KEYVAULT__ placeholders onto the
+  # live release and break it. Flip this to automated only after the
+  # Key Vault wiring in README.md is done and confirmed working.
+  syncPolicy: {}
