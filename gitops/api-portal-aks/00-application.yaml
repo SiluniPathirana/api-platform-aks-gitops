@@ -11,9 +11,26 @@
 # Secrets (api-portal-platform-api-secrets, api-portal-api-portal-ui-secrets) are
 # created out-of-band, never in git -- see README.md for the exact commands.
 #
-# api-portal-ui.image is overridden to a custom build (ghcr.io/lasanthas/api-portal,
-# not the official ghcr.io/wso2/api-platform/api-portal image) per explicit
-# instruction. platform-api stays on the official WSO2 image.
+# api-portal-ui now uses the official ghcr.io/wso2/api-platform/api-portal
+# image (previously a custom build, ghcr.io/lasanthas/api-portal, per an
+# earlier explicit instruction -- superseded).
+#
+# The live Application had drifted from this file: someone added a
+# `configToml: "[api_portal.organization]\nportal_id = \"01\"\n"` override
+# directly via `kubectl edit`, never committed here. That's not something
+# selfHeal catches -- selfHeal protects the *deployed resources* (the
+# rendered ConfigMap/Deployment) from drifting away from what this
+# Application's own spec declares; it does nothing if the Application
+# spec itself is edited directly, since that IS the declared target state
+# as far as ArgoCD is concerned. `portal_id` isn't a field the official
+# chart's [api_portal.organization] table supports at all (confirmed by
+# reading api-portal-ui/templates/configmap.yaml directly -- it renders
+# only handle/display_name/auto_create_subscription_plans) -- it was
+# something the custom image specifically needed. The raw configToml
+# injection duplicated that same TOML table, which is invalid TOML and
+# crash-looped the pod for 2 days: `[FATAL] ... trying to redefine an
+# already defined table or value`. Confirmed via `kubectl logs`. Dropped
+# entirely now that we're back on the official image.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -66,7 +83,7 @@ spec:
         api-portal-ui:
           enabled: true
           image:
-            repository: ghcr.io/lasanthas/api-portal
+            repository: ghcr.io/wso2/api-platform/api-portal
             tag: "1.0.0"
           secrets:
             existingSecret: api-portal-api-portal-ui-secrets
@@ -87,6 +104,17 @@ spec:
               # actually deploy; sslRootCert is available as a fallback if
               # verification fails.
               sslmode: verify-full
+              # Confirmed via deploy: verify-full needs an actual file the app
+              # reads (config renders `ssl_root_cert = <path>`); with this
+              # unset the app falls back to a hardcoded default path
+              # (/app/resources/security/ca.pem) that doesn't exist in the
+              # image, crashing with ENOENT. Mounted below via extraVolumes
+              # from the azure-postgres-ca-bundle ConfigMap (see
+              # 01-postgres-ca-bundle-configmap.yaml -- both current Azure
+              # Postgres root CAs, since Microsoft is mid-rotation between
+              # them as of writing: DigiCert Global Root G2 + Microsoft RSA
+              # Root CA 2017, per learn.microsoft.com/.../security-tls).
+              sslRootCert: /app/resources/security/ca.pem
             platformApi:
               # Skip TLS verification on the portal -> Platform API hop. Platform
               # API's own cert-manager cert is self-signed with commonName
@@ -99,6 +127,18 @@ spec:
               handle: default
           persistence:
             enabled: false
+          deployment:
+            # Mounts the CA bundle ConfigMap (01-postgres-ca-bundle-configmap.yaml)
+            # at the exact path config.database.sslRootCert points to, above.
+            extraVolumes:
+              - name: postgres-ca-bundle
+                configMap:
+                  name: azure-postgres-ca-bundle
+            extraVolumeMounts:
+              - name: postgres-ca-bundle
+                mountPath: /app/resources/security/ca.pem
+                subPath: ca.pem
+                readOnly: true
           service:
             annotations:
               # Azure's free DNS-label feature -- same pattern as the gateway's
