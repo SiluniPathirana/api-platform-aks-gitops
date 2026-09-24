@@ -1,0 +1,62 @@
+# API Portal manifest for the same API already deployed on the gateway
+# (gitops/gateway-operator-aks/02-restapi-aks-test-api.yaml). NOTE the
+# apiVersion here -- api-portal.api-platform.wso2.com/v1 -- is a
+# completely different schema from that file's
+# gateway.api-platform.wso2.com/v1alpha1, despite both using kind: RestApi.
+# This one is NOT a Kubernetes resource: it's uploaded as a plain file via
+# the Portal's Management API (see README.md), never `kubectl apply`'d.
+#
+# endpoints.productionUrl/sandboxUrl point at the REAL, already-deployed
+# gateway endpoint (confirmed live: `curl -sk
+# https://wk-onboarding-gw.eastus.cloudapp.azure.com:8443/aks-test/ping`
+# -> 200) -- this is what makes a subscription issued through the Portal
+# actually reach our real gateway, not a separate/duplicate deployment.
+apiVersion: api-portal.api-platform.wso2.com/v1
+kind: RestApi
+
+metadata:
+  name: aks-test-api-v1.0
+
+spec:
+  type: REST
+  displayName: AKS Test API
+  version: v1.0
+  description: >-
+    Minimal end-to-end test API (GET /ping, GET /echo) proxying to
+    httpbin.org, used to validate the gateway pipeline on wk-onboarding-aks.
+    Published to the Portal to validate the Portal <-> Gateway pipeline the
+    same way the gateway-side RestApi CR validated the commit <-> Gateway
+    pipeline.
+  status: PUBLISHED
+  referenceID: aks-test-api-v1.0
+
+  tags:
+    - aks
+    - test
+
+  labels:
+    - default
+
+  # Confirmed via GET /subscription-plans: autoCreateSubscriptionPlans: true
+  # had NOT actually seeded anything (0 plans existed for this org before
+  # publishing this API) -- created these two explicitly via
+  # POST /subscription-plans first (see README.md), id: bronze/gold,
+  # displayName: Bronze/Gold. This field links to them by displayName, NOT
+  # id (confirmed via api-portal-ui's own bundled OpenAPI spec,
+  # /app/docs/api-portal-openapi-spec-v0.9.yaml -- the lowercase ids
+  # produced a RESOURCE_NOT_FOUND on first attempt).
+  subscriptionPlans:
+    - Bronze
+    - Gold
+
+  agentVisibility: VISIBLE
+
+  businessInformation:
+    businessOwner: Platform Owner
+    businessOwnerEmail: support@example.com
+    technicalOwner: API Team
+    technicalOwnerEmail: architecture@example.com
+
+  endpoints:
+    productionUrl: https://wk-onboarding-gw.eastus.cloudapp.azure.com:8443/aks-test
+    sandboxUrl: https://wk-onboarding-gw.eastus.cloudapp.azure.com:8443/aks-test

@@ -1,0 +1,48 @@
+# OpenAPI definition matching aks-test-api's real operations, as defined on
+# the gateway (gitops/gateway-operator-aks/02-restapi-aks-test-api.yaml):
+# GET /ping and GET /echo, both proxying to https://httpbin.org/anything,
+# which echoes back whatever it receives -- hence the generic response
+# schema below (no fixed shape, since httpbin's response mirrors the
+# request).
+openapi: 3.0.1
+info:
+  title: AKS-Test-API
+  version: v1.0
+  description: |
+    Minimal test API validating the gateway pipeline on wk-onboarding-aks.
+    Both operations proxy to httpbin.org/anything, which echoes back
+    whatever it received (headers, method, etc.) -- useful for confirming
+    a request actually made it through the gateway, not for real data.
+servers:
+  - url: https://wk-onboarding-gw.eastus.cloudapp.azure.com:8443/aks-test
+
+paths:
+  /ping:
+    get:
+      summary: Ping
+      description: Round-trips through the gateway to httpbin.org/anything and back.
+      operationId: ping
+      tags:
+        - test
+      responses:
+        '200':
+          description: OK. httpbin's echo of the incoming request.
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /echo:
+    get:
+      summary: Echo
+      description: Round-trips through the gateway to httpbin.org/anything and back.
+      operationId: echo
+      tags:
+        - test
+      responses:
+        '200':
+          description: OK. httpbin's echo of the incoming request.
+          content:
+            application/json:
+              schema:
+                type: object
